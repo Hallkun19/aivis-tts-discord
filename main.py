@@ -169,14 +169,21 @@ async def audio_player_task(guild_id: str):
 def process_text_for_speech(
     message: discord.Message, dictionary: dict
 ) -> Optional[str]:
-    if message.attachments:
-        return "添付ファイル"
-    text = message.clean_content
-    if re.search(r"https?://\S+", text):
-        return "URL"
+    text_to_read = message.clean_content
+
     for word, reading in dictionary.items():
-        text = text.replace(word, reading)
-    return text
+        text_to_read = text_to_read.replace(word, reading)
+
+    text_to_read = re.sub(r"https?://\S+", "URL", text_to_read)
+
+    if message.attachments:
+        if text_to_read:
+            text_to_read += " 添付ファイル"
+        else:
+            text_to_read = "添付ファイル"
+
+    # 最終的にできた文字列を返す (空白文字のみの場合はNoneを返す)
+    return text_to_read if text_to_read.strip() else None
 
 
 # --- Botイベント ---
@@ -202,7 +209,6 @@ async def on_message(message: discord.Message):
 
     if message.content.lower() == "s":
         can_skip = session.voice_client.is_playing() or not session.queue.empty()
-
         if can_skip:
             while not session.queue.empty():
                 session.queue.get_nowait()
@@ -217,7 +223,7 @@ async def on_message(message: discord.Message):
     settings = user_settings.get(user_id, {})
     model_uuid = settings.get("model_uuid", DEFAULT_MODEL_UUID)
     speaking_rate = settings.get("speaking_rate", 1.1)
-    user_volume = settings.get("volume", 100) / 100.0  # 0.0 ~ 2.0
+    user_volume = settings.get("volume", 100) / 100.0
     dictionary = dictionaries.get(guild_id, {})
     text_to_speak = process_text_for_speech(message, dictionary)
     if not text_to_speak:
@@ -245,17 +251,17 @@ async def on_voice_state_update(
         text = f"{member.display_name}さんが退出しました"
 
     if text:
-        await session.queue.put(
-            (text, DEFAULT_MODEL_UUID, 1.0, 1.0)
-        )
+        await session.queue.put((text, DEFAULT_MODEL_UUID, 1.0, 1.0))
 
 
 # --- スラッシュコマンド ---
-@bot.tree.command(name="help", description="Botのコマンド一覧と詳細な使い方を表示します。")
+@bot.tree.command(
+    name="help", description="Botのコマンド一覧と詳細な使い方を表示します。"
+)
 async def help_command(interaction: discord.Interaction):
     embed = create_embed(
         f"{EMOJI_HELP} Aivis読み上げBot ヘルプ",
-        "Aivis Cloud APIを利用した高機能な読み上げBotです。\n各コマンドの詳しい使い方を以下に示します。"
+        "Aivis Cloud APIを利用した高機能な読み上げBotです。\n各コマンドの詳しい使い方を以下に示します。",
     )
 
     vc_description = (
@@ -267,30 +273,40 @@ async def help_command(interaction: discord.Interaction):
         "`/vc resume`: 一時停止した読み上げを再開します。\n"
         "`/vc volume [level]`: サーバー全体の音量を変更します。(0～200%)"
     )
-    embed.add_field(name=f"{EMOJI_VC} VC関連コマンド", value=vc_description, inline=False)
+    embed.add_field(
+        name=f"{EMOJI_VC} VC関連コマンド", value=vc_description, inline=False
+    )
 
     tts_description = (
         "`/tts channel [channel]`: 読み上げ対象のテキストチャンネルを変更します。\n"
         "`/tts queue`: 再生待ちのメッセージ一覧を表示します。"
     )
-    embed.add_field(name=f"{EMOJI_TTS} 読み上げ関連コマンド", value=tts_description, inline=False)
+    embed.add_field(
+        name=f"{EMOJI_TTS} 読み上げ関連コマンド", value=tts_description, inline=False
+    )
 
     dict_description = (
         "`/dict add [word] [reading]`: 単語とその読みを辞書に登録します。\n"
         "`/dict remove [word]`: 辞書から単語を削除します。\n"
         "`/dict list`: 登録されている単語の一覧を表示します。"
     )
-    embed.add_field(name=f"{EMOJI_DICT} 辞書関連コマンド", value=dict_description, inline=False)
+    embed.add_field(
+        name=f"{EMOJI_DICT} 辞書関連コマンド", value=dict_description, inline=False
+    )
 
     setting_description = (
         "`/setting model [model_uuid]`: あなたの声の種類を変更します。\n"
-        "（UUIDは[AivisHub](https://hub.aivis-project.com/)で探せます。）\n"
+        "  *UUIDは[AivisHub](https://hub.aivis-project.com/)で探せます。*\n"
         "`/setting speed [rate]`: あなたの読み上げ速度を変更します。(0.5～2.0)\n"
         "`/setting volume [level]`: あなたの個人音量を変更します。(0～200%)\n"
         "`/setting view`: あなたの現在の個人設定を確認します。\n"
         "`/setting reset`: あなたの個人設定をすべてリセットします。"
     )
-    embed.add_field(name=f"{EMOJI_SETTING} 個人設定コマンド", value=setting_description, inline=False)
+    embed.add_field(
+        name=f"{EMOJI_SETTING} 個人設定コマンド",
+        value=setting_description,
+        inline=False,
+    )
 
     other_description = (
         "**`s` と送信**: 再生中の音声と再生待ちのメッセージをすべてスキップします。\n"
@@ -639,11 +655,11 @@ async def setting_view(interaction: discord.Interaction):
     model = settings.get("model_uuid", f"{DEFAULT_MODEL_UUID} (デフォルト)")
     speed = settings.get("speaking_rate", "1.1 (デフォルト)")
     volume = settings.get("volume", "100 (デフォルト)")
-    
+
     embed = create_embed(
         title=f"{EMOJI_SETTING} {interaction.user.display_name} の設定",
         description="あなたの現在の読み上げ設定です。",
-        color=discord.Color.purple()
+        color=discord.Color.purple(),
     )
     embed.add_field(name="声のモデル (UUID)", value=f"`{model}`", inline=False)
     embed.add_field(name="話速", value=f"`{speed}`", inline=True)
