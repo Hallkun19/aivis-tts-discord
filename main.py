@@ -22,7 +22,7 @@ DATA_DIR = "data"
 DICT_FILE = f"{DATA_DIR}/dictionaries.json"
 SETTINGS_FILE = f"{DATA_DIR}/user_settings.json"
 
-# 絵文字
+# 絵文字 (変更なし)
 EMOJI_SUCCESS = "✅"
 EMOJI_ERROR = "❌"
 EMOJI_INFO = "ℹ️"
@@ -38,29 +38,45 @@ EMOJI_PAUSE = "⏸️"
 EMOJI_RESUME = "▶️"
 
 
+# --- デバッグログ用ヘルパー ---
+def log_debug(guild_id: Optional[str], message: str):
+    """コンソールにデバッグログを出力する"""
+    guild_tag = f"[{guild_id or 'GLOBAL'}]"
+    print(f"[DEBUG] {guild_tag} {message}")
+
+
 # --- データクラス ---
 class GuildSession:
-    """サーバーごとのセッション情報を管理するクラス"""
-
     def __init__(self, bot_loop: asyncio.AbstractEventLoop, guild_id: str):
         self.voice_client: Optional[discord.VoiceClient] = None
         self.text_channel_id: Optional[int] = None
         self.queue = asyncio.Queue()
         self.is_muted: bool = False
-        self.server_volume: float = 0.75  # サーバー全体の音量 (0.0 ~ 2.0)
+        self.server_volume: float = 0.75
+        log_debug(guild_id, "Creating new player task...")
         self.player_task = bot_loop.create_task(audio_player_task(guild_id))
 
     def stop(self):
-        self.player_task.cancel()
+        log_debug(
+            self.voice_client.guild.id if self.voice_client else None,
+            "GuildSession.stop() called.",
+        )
+        if self.player_task and not self.player_task.done():
+            self.player_task.cancel()
+            log_debug(
+                self.voice_client.guild.id if self.voice_client else None,
+                "Player task cancelled.",
+            )
+        self.voice_client = None
 
 
-# --- グローバル変数 ---
+# --- グローバル変数 --- (変更なし)
 guild_sessions: Dict[str, GuildSession] = {}
 dictionaries: Dict[str, Dict[str, str]] = {}
 user_settings: Dict[str, Dict] = {}
 
 
-# --- ヘルパー関数 ---
+# --- ヘルパー関数 --- (変更なし)
 def load_data(filepath: str) -> dict:
     try:
         with open(filepath, "r", encoding="utf-8") as f:
@@ -80,7 +96,7 @@ def create_embed(
     return discord.Embed(title=title, description=description, color=color)
 
 
-# --- Botクラスの拡張 ---
+# --- Botクラスの拡張 --- (変更なし)
 class AivisBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -88,7 +104,6 @@ class AivisBot(commands.Bot):
 
     async def setup_hook(self):
         self.http_session = aiohttp.ClientSession()
-        # コマンドグループをTreeに追加
         self.tree.add_command(vc_commands)
         self.tree.add_command(tts_commands)
         self.tree.add_command(dict_commands)
@@ -100,7 +115,7 @@ class AivisBot(commands.Bot):
             await self.http_session.close()
 
 
-# --- Botの初期化 ---
+# --- Botの初期化 --- (変更なし)
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
@@ -111,6 +126,7 @@ bot = AivisBot(command_prefix="!", intents=intents)
 async def synthesize_speech(
     text: str, model_uuid: str, speaking_rate: float
 ) -> Optional[bytes]:
+    # (この関数は変更なし)
     url = "https://api.aivis-project.com/v1/tts/synthesize"
     headers = {
         "Authorization": f"Bearer {AIVIS_API_KEY}",
@@ -136,53 +152,81 @@ async def synthesize_speech(
         return None
 
 
+# ★★★★★ ここからが最も重要な変更点です ★★★★★
 async def audio_player_task(guild_id: str):
+    log_debug(guild_id, "Audio player task started.")
     while True:
         try:
-            session = guild_sessions[guild_id]
-            text, model_uuid, rate, user_volume = await session.queue.get()
+            session = guild_sessions.get(guild_id)
+            if not session:
+                log_debug(guild_id, "Session not found, stopping player task.")
+                break
 
-            if not session.voice_client or not session.voice_client.is_connected():
+            log_debug(guild_id, "Waiting for next item in queue...")
+            text, model_uuid, rate, user_volume = await session.queue.get()
+            log_debug(guild_id, f"Got item from queue: '{text[:30]}...'")
+
+            if not session.voice_client:
+                log_debug(guild_id, "Player task: Voice client is None. Skipping.")
                 continue
 
+            if not session.voice_client.is_connected():
+                log_debug(
+                    guild_id, "Player task: Voice client not connected. Skipping."
+                )
+                continue
+
+            log_debug(
+                guild_id,
+                f"VC is connected. Latency: {session.voice_client.latency:.2f}s",
+            )
+
+            log_debug(guild_id, "Synthesizing speech...")
             audio_data = await synthesize_speech(text, model_uuid, rate)
             if not audio_data:
+                log_debug(
+                    guild_id, "Speech synthesis failed (audio_data is None). Skipping."
+                )
                 continue
+            log_debug(guild_id, "Speech synthesis successful.")
 
             source = discord.FFmpegPCMAudio(
                 io.BytesIO(audio_data), pipe=True, options="-vn"
             )
-            # サーバー音量と個人音量を掛け合わせる
             final_volume = session.server_volume * user_volume
             volume_source = discord.PCMVolumeTransformer(source, volume=final_volume)
+
+            log_debug(guild_id, f"Playing audio (Final Volume: {final_volume:.2f})...")
             session.voice_client.play(volume_source)
 
             while session.voice_client.is_playing() or session.voice_client.is_paused():
                 await asyncio.sleep(0.5)
+            log_debug(guild_id, "Audio playback finished.")
+
         except asyncio.CancelledError:
+            log_debug(guild_id, "Player task cancelled.")
             break
         except Exception as e:
-            print(f"Error in audio player task for guild {guild_id}: {e}")
-            break
+            log_debug(
+                guild_id, f"CRITICAL: Unhandled exception in audio player task: {e}"
+            )
+            log_debug(guild_id, "Player task restarting after 5s delay...")
+            await asyncio.sleep(5)  # タスクが死なないようにループを継続
 
 
 def process_text_for_speech(
     message: discord.Message, dictionary: dict
 ) -> Optional[str]:
+    # (この関数は変更なし)
     text_to_read = message.clean_content
-
     for word, reading in dictionary.items():
         text_to_read = text_to_read.replace(word, reading)
-
     text_to_read = re.sub(r"https?://\S+", "URL", text_to_read)
-
     if message.attachments:
         if text_to_read:
             text_to_read += " 添付ファイル"
         else:
             text_to_read = "添付ファイル"
-
-    # 最終的にできた文字列を返す (空白文字のみの場合はNoneを返す)
     return text_to_read if text_to_read.strip() else None
 
 
@@ -193,7 +237,7 @@ async def on_ready():
     os.makedirs(DATA_DIR, exist_ok=True)
     dictionaries = load_data(DICT_FILE)
     user_settings = load_data(SETTINGS_FILE)
-    print(f"{bot.user} としてログインしました。")
+    log_debug(None, f"{bot.user} としてログインしました。")
 
 
 @bot.event
@@ -202,20 +246,52 @@ async def on_message(message: discord.Message):
         return
     guild_id = str(message.guild.id)
     session = guild_sessions.get(guild_id)
-    if not session or session.text_channel_id != message.channel.id or session.is_muted:
+
+    # log_debug(guild_id, f"Message received from {message.author}: '{message.content[:30]}...'")
+
+    if not session:
         return
-    if not session.voice_client or not session.voice_client.is_connected():
+    if session.text_channel_id != message.channel.id:
+        return
+    if session.is_muted:
+        # log_debug(guild_id, "Session is muted, ignoring message.")
+        return
+
+    if not session.voice_client:
+        log_debug(guild_id, "on_message: Voice client is None!")
+        return
+
+    if not session.voice_client.is_connected():
+        log_debug(guild_id, "on_message: VC not connected or connection lost!")
+        if session.text_channel_id:
+            try:
+                channel = bot.get_channel(session.text_channel_id)
+                if channel:
+                    await channel.send(
+                        embed=create_embed(
+                            f"{EMOJI_ERROR} 接続エラー",
+                            "ボイスチャンネルとの接続が切れました。\nお手数ですが `/vc join` コマンドで再接続してください。",
+                            discord.Color.red(),
+                        )
+                    )
+            except (discord.Forbidden, discord.NotFound) as e:
+                log_debug(guild_id, f"Failed to send connection error message: {e}")
+        session.is_muted = True
+        log_debug(guild_id, "Session muted to prevent error spam.")
         return
 
     if message.content.lower() == "s":
+        log_debug(guild_id, "Skip command 's' received.")
         can_skip = session.voice_client.is_playing() or not session.queue.empty()
         if can_skip:
+            log_debug(guild_id, "Skipping... Clearing queue and stopping player.")
             while not session.queue.empty():
                 session.queue.get_nowait()
             if session.voice_client.is_playing():
                 session.voice_client.stop()
             await message.add_reaction("⏩")
         else:
+            log_debug(guild_id, "Nothing to skip.")
             await message.add_reaction("❌")
         return
 
@@ -225,10 +301,14 @@ async def on_message(message: discord.Message):
     speaking_rate = settings.get("speaking_rate", 1.1)
     user_volume = settings.get("volume", 100) / 100.0
     dictionary = dictionaries.get(guild_id, {})
+
+    # log_debug(guild_id, "Processing text for speech...")
     text_to_speak = process_text_for_speech(message, dictionary)
     if not text_to_speak:
+        log_debug(guild_id, "No text to speak after processing, ignoring.")
         return
 
+    log_debug(guild_id, f"Adding to queue: '{text_to_speak[:30]}...'")
     await session.queue.put((text_to_speak, model_uuid, speaking_rate, user_volume))
 
 
@@ -242,15 +322,19 @@ async def on_voice_state_update(
     session = guild_sessions.get(guild_id)
     if not session or not session.voice_client:
         return
+
     vc_channel = session.voice_client.channel
 
     text = None
     if before.channel != vc_channel and after.channel == vc_channel:
+        log_debug(guild_id, f"User {member.display_name} joined the channel.")
         text = f"{member.display_name}さんが参加しました"
     elif before.channel == vc_channel and after.channel != vc_channel:
+        log_debug(guild_id, f"User {member.display_name} left the channel.")
         text = f"{member.display_name}さんが退出しました"
 
     if text:
+        log_debug(guild_id, f"Adding notification to queue: '{text}'")
         await session.queue.put((text, DEFAULT_MODEL_UUID, 1.0, 1.0))
 
 
@@ -259,11 +343,11 @@ async def on_voice_state_update(
     name="help", description="Botのコマンド一覧と詳細な使い方を表示します。"
 )
 async def help_command(interaction: discord.Interaction):
+    # (この関数は変更なし)
     embed = create_embed(
         f"{EMOJI_HELP} Aivis読み上げBot ヘルプ",
         "Aivis Cloud APIを利用した高機能な読み上げBotです。\n各コマンドの詳しい使い方を以下に示します。",
     )
-
     vc_description = (
         "`/vc join`: あなたがいるVCに参加し、このチャンネルの読み上げを開始します。\n"
         "`/vc leave`: VCから退出します。\n"
@@ -276,7 +360,6 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name=f"{EMOJI_VC} VC関連コマンド", value=vc_description, inline=False
     )
-
     tts_description = (
         "`/tts channel [channel]`: 読み上げ対象のテキストチャンネルを変更します。\n"
         "`/tts queue`: 再生待ちのメッセージ一覧を表示します。"
@@ -284,7 +367,6 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name=f"{EMOJI_TTS} 読み上げ関連コマンド", value=tts_description, inline=False
     )
-
     dict_description = (
         "`/dict add [word] [reading]`: 単語とその読みを辞書に登録します。\n"
         "`/dict remove [word]`: 辞書から単語を削除します。\n"
@@ -293,7 +375,6 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name=f"{EMOJI_DICT} 辞書関連コマンド", value=dict_description, inline=False
     )
-
     setting_description = (
         "`/setting model [model_uuid]`: あなたの声の種類を変更します。\n"
         "  *UUIDは[AivisHub](https://hub.aivis-project.com/)で探せます。*\n"
@@ -307,13 +388,11 @@ async def help_command(interaction: discord.Interaction):
         value=setting_description,
         inline=False,
     )
-
     other_description = (
         "**`s` と送信**: 再生中の音声と再生待ちのメッセージをすべてスキップします。\n"
         "**VCへの参加/退出通知**: ユーザーがVCに出入りすると、その旨を読み上げます。"
     )
     embed.add_field(name="✨ その他の機能", value=other_description, inline=False)
-
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -330,7 +409,11 @@ setting_commands = app_commands.Group(
     name="join", description="VCに参加し、このチャンネルの読み上げを開始します。"
 )
 async def vc_join(interaction: discord.Interaction):
+    guild_id = str(interaction.guild.id)
+    log_debug(guild_id, f"/vc join command triggered by {interaction.user}.")
+
     if not interaction.user.voice:
+        log_debug(guild_id, "User not in a voice channel.")
         return await interaction.response.send_message(
             embed=create_embed(
                 f"{EMOJI_ERROR} エラー",
@@ -341,17 +424,30 @@ async def vc_join(interaction: discord.Interaction):
         )
 
     voice_channel = interaction.user.voice.channel
+
+    if interaction.guild.voice_client:
+        log_debug(guild_id, "Found existing voice client, disconnecting...")
+        await interaction.guild.voice_client.disconnect(force=True)
+        log_debug(guild_id, "Disconnected existing client.")
+
+    if guild_id in guild_sessions:
+        log_debug(guild_id, "Found existing session, stopping and deleting...")
+        guild_sessions[guild_id].stop()
+        del guild_sessions[guild_id]
+        log_debug(guild_id, "Old session deleted.")
+
     try:
+        log_debug(guild_id, f"Connecting to VC: {voice_channel.name}...")
         vc = await voice_channel.connect()
         await interaction.guild.me.edit(deafen=True)
+        log_debug(guild_id, "Connected successfully and deafened.")
 
-        guild_id = str(interaction.guild.id)
-        if guild_id not in guild_sessions:
-            guild_sessions[guild_id] = GuildSession(bot.loop, guild_id)
-
-        session = guild_sessions[guild_id]
+        log_debug(guild_id, "Creating new GuildSession...")
+        session = GuildSession(bot.loop, guild_id)
+        guild_sessions[guild_id] = session
         session.voice_client = vc
         session.text_channel_id = interaction.channel.id
+        log_debug(guild_id, "New session created successfully.")
 
         embed = create_embed(
             f"{EMOJI_VC} 接続しました", f"**{voice_channel.name}** に参加しました。"
@@ -367,6 +463,7 @@ async def vc_join(interaction: discord.Interaction):
         embed.add_field(name="読み上げ状態", value="有効", inline=True)
         await interaction.response.send_message(embed=embed)
     except Exception as e:
+        log_debug(guild_id, f"Failed to join VC: {e}")
         await interaction.response.send_message(
             embed=create_embed(
                 f"{EMOJI_ERROR} エラー", f"接続に失敗しました: {e}", discord.Color.red()
@@ -377,7 +474,11 @@ async def vc_join(interaction: discord.Interaction):
 
 @vc_commands.command(name="leave", description="VCから退出します。")
 async def vc_leave(interaction: discord.Interaction):
+    guild_id = str(interaction.guild.id)
+    log_debug(guild_id, f"/vc leave command triggered by {interaction.user}.")
+
     if not interaction.guild.voice_client:
+        log_debug(guild_id, "Bot not in any VC.")
         return await interaction.response.send_message(
             embed=create_embed(
                 f"{EMOJI_ERROR} エラー",
@@ -386,16 +487,23 @@ async def vc_leave(interaction: discord.Interaction):
             ),
             ephemeral=True,
         )
-    guild_id = str(interaction.guild.id)
+
     if guild_id in guild_sessions:
+        log_debug(guild_id, "Stopping player task and deleting session...")
         guild_sessions[guild_id].stop()
         del guild_sessions[guild_id]
+        log_debug(guild_id, "Session deleted.")
+
     await interaction.guild.voice_client.disconnect()
+    log_debug(guild_id, "Disconnected from VC.")
     await interaction.response.send_message(
         embed=create_embed(
             f"{EMOJI_WAVE} 退出しました", "ボイスチャンネルから退出しました。"
         )
     )
+
+
+# --- (vc_mute から setting_reset まではログ追加なし) ---
 
 
 @vc_commands.command(name="mute", description="読み上げをミュートします。")
@@ -655,7 +763,6 @@ async def setting_view(interaction: discord.Interaction):
     model = settings.get("model_uuid", f"{DEFAULT_MODEL_UUID} (デフォルト)")
     speed = settings.get("speaking_rate", "1.1 (デフォルト)")
     volume = settings.get("volume", "100 (デフォルト)")
-
     embed = create_embed(
         title=f"{EMOJI_SETTING} {interaction.user.display_name} の設定",
         description="あなたの現在の読み上げ設定です。",
